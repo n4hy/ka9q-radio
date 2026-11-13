@@ -207,7 +207,7 @@ int demod_wfm(void *arg){
     // Constant gain used by FM only; automatically adjusted by AGC in linear modes
     // We do this in the loop because headroom and BW can change
     // Force reasonable parameters if they get messed up or aren't initialized
-    chan->output.gain = (2 * chan->output.headroom * Composite_samprate) / fabs(chan->filter.min_IF - chan->filter.max_IF);
+    chan->output.gain = (2 * chan->output.headroom * Composite_samprate) / fmax(fabs(chan->filter.min_IF - chan->filter.max_IF),1.0);
 
     bool pilot_present = false;
     if(chan->fm.stereo_enable){

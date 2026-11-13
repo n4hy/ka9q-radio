@@ -384,6 +384,7 @@ static int max_frames(struct channel *chan){
     break;
 #endif
   case OPUS:
+  case OPUS_VOIP: // was missing: max_frames_per_pkt stayed 0 and nothing was ever sent
     max_frames_per_pkt = lrint(chan->output.samprate * 0.12); // 120 ms is biggest Opus frame regardless of channels
     break;
   case MULAW:

@@ -71,7 +71,7 @@ int demod_fm(void *arg){
   int pl_sample_count = 0;
   double old_pl_phase = 0;
   bool tone_mute = true; // When tone squelch enabled, mute until the tone is detected
-  chan->output.gain = (2 * chan->output.headroom *  samprate) / fabs(chan->filter.min_IF - chan->filter.max_IF);
+  chan->output.gain = (2 * chan->output.headroom *  samprate) / fmax(fabs(chan->filter.min_IF - chan->filter.max_IF),1.0);
   bool response_needed = true;
   bool restart_needed = false;
   pthread_mutex_unlock(&chan->status.lock);
@@ -284,7 +284,7 @@ int demod_fm(void *arg){
 	  update_goertzel(&tone_detect,baseband[n]); // input is -1 to +1
 	  double const y = applyIIR(&lpf,baseband[n]); // should be unity gain in passband
 	  lpf_energy += y*y;
-	  if(chan->options & (1LL<0)){
+	  if(chan->options & (1LL<<0)){
 	    // Test option: let's hear the LPF output
 	    baseband[n] = (float)y;
 	  }
@@ -305,7 +305,7 @@ int demod_fm(void *arg){
 	    assert(np >= -1.0 && np <= 1.0);
 
 	    lpf_energy /= pl_sample_count; // filter output average energy per sample, range 0 to +1 half-rev^2 per sample
-	    if(chan->options & (1LL<1)){
+	    if(chan->options & (1LL<<1)){
 	      // Experimental, needs a new 300 Hz audio LPF before it is ready. Otherwise lots of low frequency voice can falsely gate it off
 	      // Scale g*g to half revs per sample^2, same as lpf_energy
 	      tone_mute = (2*g*g / lpf_energy) < 0.25; // boolean result: if tone -6 dB to LPF total, mute.
@@ -338,7 +338,7 @@ int demod_fm(void *arg){
     // Constant gain used by FM only; automatically adjusted by AGC in linear modes
     // We do this in the loop because BW can change
     // Force reasonable parameters if they get messed up or aren't initialized
-    double const gain = (2 * chan->output.headroom *  samprate) / fabs(chan->filter.min_IF - chan->filter.max_IF);
+    double const gain = (2 * chan->output.headroom *  samprate) / fmax(fabs(chan->filter.min_IF - chan->filter.max_IF),1.0);
     chan->output.gain = gain;
 
     double output_energy = 0;
