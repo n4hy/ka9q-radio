@@ -16,6 +16,9 @@
 #include "window.h"
 
 //#define RICE 1
+
+// Upper bound on the narrowband averaging ring, complex samples (2^26 * 8 bytes = 512 MiB)
+#define MAX_SPECTRUM_RING (1 << 26)
 //#define SPECTRUM_CLIP 1
 //#define FIXED_STEP  1
 
@@ -57,7 +60,8 @@ int demod_spectrum(void *arg){
   enum window_type window_type = -1; // force generation on first loop
   double rbw = -1;
   int bin_count = -1;
-  int crossover = -1;
+  int bin_alloc = 0; // number of floats currently allocated in chan->spectrum.bin_data
+  double crossover = -1;
   double shape = -1;
   int timeout = 0;
 
@@ -80,6 +84,19 @@ int demod_spectrum(void *arg){
       }
     }
     pthread_mutex_unlock(&chan->status.lock);
+
+    // Keep bin_data sized to bin_count at all times. response() at the top of this loop encodes
+    // bin_count elements from bin_data, so it must never see a count larger than the allocation
+    if(chan->spectrum.bin_count > 0 && (chan->spectrum.bin_data == NULL || bin_alloc != chan->spectrum.bin_count)){
+      float *nb = realloc(chan->spectrum.bin_data, (size_t)chan->spectrum.bin_count * sizeof *nb);
+      if(nb == NULL){
+	fprintf(stderr,"spectrum: realloc of %d bins failed\n",chan->spectrum.bin_count);
+	goto quit; // quit frees the old bin_data
+      }
+      memset(nb,0,(size_t)chan->spectrum.bin_count * sizeof *nb);
+      chan->spectrum.bin_data = nb;
+      bin_alloc = chan->spectrum.bin_count;
+    }
 
     // Must handle possible parameter changes from decode_radio_commands() BEFORE executing the downconverter,
     // which will act immediately on those changes. Otherwise segfaults occur when crossing between wideband and narrowband
@@ -128,21 +145,29 @@ int demod_spectrum(void *arg){
 	if(chan->spectrum.ring == NULL)
 	  chan->spectrum.ring_idx = 0; // ? no need to reset on growth vs start?
 
-	int old_ring_size = chan->spectrum.ring_size;
-	chan->spectrum.ring_size = chan->spectrum.fft_avg * chan->spectrum.fft_n;
-	assert(chan->spectrum.ring_size > 0);
+	int const old_ring_size = chan->spectrum.ring_size;
+	if(chan->spectrum.fft_n <= 0 || (int64_t)chan->spectrum.fft_avg * chan->spectrum.fft_n > MAX_SPECTRUM_RING){
+	  // fft_avg comes from the network; keep the ring within bounds (and within int range)
+	  chan->spectrum.fft_avg = chan->spectrum.fft_n > 0 ? max(1, MAX_SPECTRUM_RING / chan->spectrum.fft_n) : 1;
+	}
+	int const new_ring_size = chan->spectrum.fft_avg * chan->spectrum.fft_n;
+	if(new_ring_size <= 0)
+	  continue;
 	void *old = chan->spectrum.ring;
-	int newsize =  chan->spectrum.ring_size * sizeof *chan->spectrum.ring;
-	assert(newsize > 0);
+	size_t const newsize = (size_t)new_ring_size * sizeof *chan->spectrum.ring;
 	chan->spectrum.ring = realloc(chan->spectrum.ring,newsize);
 	if(chan->spectrum.ring == NULL){
-	  fprintf(stderr,"spectrum: realloc(%d) failed\n",newsize);
+	  fprintf(stderr,"spectrum: realloc(%zu) failed\n",newsize);
 	  FREE(old); // emulate reallocf() in case the realloc fails
+	  chan->spectrum.ring_size = 0;
 	  goto quit;
 	}
+	chan->spectrum.ring_size = new_ring_size;
+	if(chan->spectrum.ring_idx >= new_ring_size)
+	  chan->spectrum.ring_idx = 0;
 	// Clear the new space to avoid display glitches
-	assert(newsize >= old_ring_size);
-	memset(chan->spectrum.ring + old_ring_size, 0, (chan->spectrum.ring_size - old_ring_size) * sizeof *chan->spectrum.ring);
+	assert(new_ring_size >= old_ring_size);
+	memset(chan->spectrum.ring + old_ring_size, 0, (size_t)(new_ring_size - old_ring_size) * sizeof *chan->spectrum.ring);
       }
       assert(chan->spectrum.ring != NULL);
       for(int i=0; i < chan->sampcount; i++){
@@ -155,15 +180,9 @@ int demod_spectrum(void *arg){
 	timeout = 0;
     }
     if(response_needed){      // Generate new bin data for the next response
-      // Make sure output frequency bin data buffers exist
-      if(chan->spectrum.bin_data == NULL || chan->spectrum.bin_count != bin_count){
-	void *old = chan->spectrum.ring;
-	chan->spectrum.bin_data = realloc(chan->spectrum.bin_data, chan->spectrum.bin_count * sizeof *chan->spectrum.bin_data);
-	if(chan->spectrum.bin_data == NULL){
-	  FREE(old); // emulate reallocf()
-	  goto quit;
-	}
-      }
+      // bin_data was sized to bin_count right after the command decode above
+      if(chan->spectrum.bin_data == NULL || bin_alloc != chan->spectrum.bin_count)
+	continue;
       if(chan->spectrum.rbw <= chan->spectrum.crossover){
 #if 0
 	// Don't run FFT more often than one FFT's worth of samples
@@ -195,7 +214,7 @@ int demod_spectrum(void *arg){
   delete_filter_output(&chan->filter.out);
   chan->baseband = NULL;
   if(chan->spectrum.plan)
-    fftwf_destroy_plan(chan->spectrum.plan);
+    destroy_plan(chan->spectrum.plan);
   chan->spectrum.plan = NULL;
   FREE(chan->spectrum.window);
   for(int i=0; i < CQLEN; i++){
@@ -370,10 +389,15 @@ static void wideband_poll(struct channel *chan){
     float complex * restrict fft_out = fftwf_alloc_complex(fft_n/2 + 1); // r2c has only the positive frequencies
     assert(fft_out != NULL);
     double const gain = 2./(double)((int64_t)fft_avg * fft_n * fft_n); // +3dB to include the virtual conjugate spectrum
+    // Decide on inversion once; it was previously re-decided (and shift negated) inside the loop,
+    // so only the first of fft_avg iterations was inverted
+    bool const invert = shift < 0;
+    if(invert)
+      shift = -shift; // make positive
 
     for(int iter=0; iter < fft_avg; iter++){
       // Copy and window raw A/D
-      if(shift >= 0){
+      if(!invert){
 	// Upright spectrum
 	for(int i=0; i < fft_n; i++)
 	  fft_in[i] = window[i] * input[i];
@@ -388,18 +412,18 @@ static void wideband_poll(struct channel *chan){
 	}
 	if(fft_n & 1)
 	  fft_in[fft_n-1] = 0;
-	shift = -shift; // make positive
       }
       fftwf_execute_dft_r2c(plan,fft_in,fft_out);
 
       // Spectrum is always right side up so shift is never negative
-      // Start with DC + positive frequencies, then wrap to negative
-      int binp = shift;
-      assert(binp >= 0);
-      for(int i=0;i < bin_count && binp < fft_n/2+1 ; i++,binp++){
-	if(i == bin_count/2)
-	  binp -= bin_count; // crossed into negative output rang, Wrap input back to lowest frequency requested
-
+      // Output bins: DC + positive frequencies, then negative, as in narrowband_poll()
+      // Output bin i is at offset (i < bin_count/2 ? i : i - bin_count) bins from the center
+      // Skip any output bin that falls outside the r2c output range 0...fft_n/2
+      assert(shift >= 0);
+      for(int i=0; i < bin_count; i++){
+	int const binp = shift + (i < bin_count/2 ? i : i - bin_count);
+	if(binp < 0 || binp > fft_n/2)
+	  continue;
 	double const p = cnrm(fft_out[binp]);
 	assert(!isnan(p) && isfinite(p));
 	if(!isnan(p) && isfinite(p))
@@ -430,40 +454,21 @@ static void wideband_poll(struct channel *chan){
 
       fftwf_execute_dft(plan,fft_in,fft_out);
 
-      // Copy requested bins to user, starting with requested frequency
-      int binp;
-      int i = 0;
-
-      if(shift >= 0){
-	// Starts in positive spectrum
-	if(shift >= fft_n/2) // starts past end of spectrum, nothing to return
-	  goto done;
-	binp = shift;
-      } else {
-	// shift < 0, starts in negative spectrum
-	if(-shift >= fft_n)
-	  goto done; // Nothing overlaps, quit
-	if(-shift >= fft_n/2){ // before start of input spectrum
-	  i = -shift - fft_n/2;
-	  binp = fft_n/2; // start input at lowest negative frequency
-	} else {
-	  binp = fft_n + shift;
-	}
-      }
-      do {
-	assert(binp >= 0 && binp < fft_n && i >= 0 && i < bin_count);
+      // Copy requested bins to user
+      // Output bin i is at offset (i < bin_count/2 ? i : i - bin_count) bins from the center, as in narrowband_poll()
+      // Input frequencies -(fft_n/2) ... (fft_n-1)/2 are valid; negative ones are stored at fft_n + f
+      // (The old loop started at output bin 0 and stopped at bin_count/2, so the negative half was never filled)
+      for(int i=0; i < bin_count; i++){
+	int const f = shift + (i < bin_count/2 ? i : i - bin_count);
+	if(f < -(fft_n/2) || f > (fft_n-1)/2)
+	  continue; // no input coverage
+	int const binp = f < 0 ? f + fft_n : f;
+	assert(binp >= 0 && binp < fft_n);
 	double const p = cnrm(fft_out[binp]);
 	assert(!isnan(p) && isfinite(p));
 	if(!isnan(p) && isfinite(p))
 	  bin_data[i] += gain * p;
-
-	// Increment and wrap indices
-	if(++i == bin_count)
-	  i = 0; // wrap to DC
-	if(++binp == fft_n)
-	  binp = 0; // wrap to DC
-      } while(i != bin_count/2 && binp != fft_n/2); // upper ends of positive frequncies
-    done:;
+      }
 
       // Back to previous buffer
       input -= lrint(fft_n * (1. - chan->spectrum.overlap));
@@ -552,7 +557,11 @@ static void generate_window(struct channel *chan){
   case GAUSSIAN_WINDOW:
     // Reuse kaiser β as σ parameter
     // note σ = 0 is a pathological value for gaussian, it's an impulse with infinite sidelobes
-    gaussian_window_alpha(chan->spectrum.window, chan->spectrum.fft_n+1,chan->spectrum.shape, false); // we normalize them all below
+    if(gaussian_window_alpha(chan->spectrum.window, chan->spectrum.fft_n+1,chan->spectrum.shape, false) != 0){ // we normalize them all below
+      // alpha <= 0 is rejected; use its limit, exp(0) = 1, i.e., rectangular, rather than leave the window uninitialized
+      for(int i=0; i < chan->spectrum.fft_n; i++)
+	chan->spectrum.window[i] = 1;
+    }
     break;
   case HANN_WINDOW:
     for(int i=0; i < chan->spectrum.fft_n; i++)
@@ -582,7 +591,24 @@ static void generate_window(struct channel *chan){
 static void setup_wideband(struct channel *chan){
   // Direct Wideband mode. Setup FFT to work on raw A/D input
   // What can we do about unfriendly sizes? Anything?
-  chan->spectrum.fft_n = lrint(chan->frontend->samprate / chan->spectrum.rbw);
+  {
+    // The poll reads fft_n samples back from the write pointer with a single backward wrap,
+    // so fft_n must not exceed the input buffer. rbw comes from the network
+    size_t const bufsamps = chan->frontend->in.input_buffer_size
+      / (chan->frontend->isreal ? sizeof(float) : sizeof(float complex));
+    double n = round(chan->frontend->samprate / chan->spectrum.rbw);
+    bool clamped = false;
+    if(!(n >= 1)){
+      n = 1;
+      clamped = true;
+    } else if(n > (double)bufsamps){
+      n = (double)bufsamps;
+      clamped = true;
+    }
+    chan->spectrum.fft_n = (int)n;
+    if(clamped)
+      chan->spectrum.rbw = chan->frontend->samprate / chan->spectrum.fft_n; // report the resolution actually used
+  }
   chan->output.samprate = 0; // Not meaningful
   chan->output.channels = 0;
   if(Verbose > 1)
@@ -634,7 +660,7 @@ static void setup_narrowband(struct channel *chan){
   chan->filter.max_IF = (double)(chan->output.samprate - margin)/2;
   chan->filter.min_IF = -chan->filter.max_IF;
   chan->filter2.blocking = 0; // Not used in this mode, make sure it's 0
-  set_filter(&chan->filter.out,chan->filter.min_IF,chan->filter.max_IF,chan->filter.kaiser_beta);
+  set_filter(&chan->filter.out,chan->filter.min_IF/chan->output.samprate,chan->filter.max_IF/chan->output.samprate,chan->filter.kaiser_beta);
   chan->filter.remainder = NAN; // Force init of downconverter
   chan->filter.bin_shift = 1010101010; // Unlikely - but a kludge, force init of phase rotator
 
@@ -642,7 +668,7 @@ static void setup_narrowband(struct channel *chan){
 }
 static void setup_real_fft(struct channel *chan){
   if(chan->spectrum.plan != NULL)
-    fftwf_destroy_plan(chan->spectrum.plan);
+    destroy_plan(chan->spectrum.plan);
   float *in = fftwf_alloc_real(chan->spectrum.fft_n);
   assert(in != NULL);
   float complex *out = fftwf_alloc_complex(chan->spectrum.fft_n/2+1); // N/2 + 1 output points for real->complex
@@ -655,7 +681,7 @@ static void setup_real_fft(struct channel *chan){
 static void setup_complex_fft(struct channel *chan){
   // Wideband mode with complex front end, or narrowband mode with either front end
   if(chan->spectrum.plan != NULL)
-    fftwf_destroy_plan(chan->spectrum.plan);
+    destroy_plan(chan->spectrum.plan);
 
   float complex *in = fftwf_alloc_complex(chan->spectrum.fft_n);
   assert(in != NULL);
