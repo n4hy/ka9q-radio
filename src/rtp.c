@@ -2,6 +2,7 @@
 // Copyright 2026 Phil Karn, KA9Q
 
 #define _GNU_SOURCE 1
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -269,7 +270,18 @@ enum encoding encoding_from_pt(int const type){
 // Dynamically create a new one if not found
 // Should lock the table when it's modified
 // Use for sending only! Receivers need to build a table for each sender
+static pthread_mutex_t PT_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int pt_from_info_locked(int samprate,int channels,enum encoding encoding);
+
+// Every demod thread and the status thread can call this; serialize the search-and-allocate
+// so two threads can't give one PT two meanings
 int pt_from_info(int samprate,int channels,enum encoding encoding){
+  pthread_mutex_lock(&PT_table_mutex);
+  int const type = pt_from_info_locked(samprate,channels,encoding);
+  pthread_mutex_unlock(&PT_table_mutex);
+  return type;
+}
+static int pt_from_info_locked(int samprate,int channels,enum encoding encoding){
   if(samprate <= 0 || channels <= 0 || channels > 2 || encoding == NO_ENCODING || encoding >= UNUSED_ENCODING)
     return -1;
 

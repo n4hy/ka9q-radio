@@ -34,6 +34,12 @@
 extern dictionary const *Preset_table;
 static unsigned long encode_radio_status(struct frontend const *frontend,struct channel *chan,uint8_t *packet, unsigned long len);
 
+// Bounds on values that arrive in command packets from the network
+#define MAX_KAISER_BETA 40.0  // misc.c i0() series is accurate to ~2e-8 relative at 40, 5e-5 at 50, <1% at 60
+#define MAX_BIN_COUNT 65000   // spectrum bins; status encoder also checks the bin data fits the packet
+#define MAX_SPECTRUM_AVG 10000
+#define MIN_RESOLUTION_BW 0.01 // Hz
+
 // Radio status reception and transmission thread
 void *radio_status(void *arg){
   pthread_setname("radio stat");
@@ -143,24 +149,10 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
   // First pass to execute any PRESET command first
   uint8_t const *cp = buffer;
   while(cp < buffer + length){
-    enum status_type const type = *cp++; // increment cp to length field
-
-    if(type == EOL)
-      break; // end of list, no length
-
-    unsigned int optlen = *cp++;
-    if(optlen & 0x80){
-      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
-      int length_of_length = optlen & 0x7f;
-      optlen = 0;
-      while(length_of_length > 0){
-	optlen <<= 8;
-	optlen |= *cp++;
-	length_of_length--;
-      }
-    }
-    if(cp + optlen >= buffer + length)
-      break; // invalid length; we can't continue to scan
+    enum status_type type;
+    unsigned int optlen;
+    if(tlv_parse(&cp,buffer + length,&type,&optlen) <= 0)
+      break; // EOL, end of buffer, or malformed/truncated option
 
     assert(type != EOL); // Should be caught above
     switch(type){
@@ -168,6 +160,8 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       {
 	struct channel old = *chan; // Copy old to detect changes
 	char *p = decode_string(cp,optlen);
+	if(p == NULL)
+	  break;
 	strlcpy(chan->preset,p,sizeof(chan->preset));
 	FREE(p); // decode_string now allocs memory
 	if(Verbose > 1)
@@ -199,6 +193,13 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	    fprintf(stderr,"%s samp rate change %'u -> %'u\n",chan->name,old.output.samprate,chan->output.samprate);
 	  restart_needed = true; // chan changed, ask for a restart
 	}
+	if(chan->output.samprate != old.output.samprate || chan->output.channels != old.output.channels
+	   || chan->output.encoding != old.output.encoding){
+	  // The preset changed the output format; the RTP payload type must follow (it was left stale)
+	  int const pt = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
+	  if(pt != -1)
+	    chan->output.rtp.type = pt;
+	}
       }
       break;
     default:
@@ -209,24 +210,10 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
   // Second pass
   cp = buffer;
   while(cp < buffer + length){
-    enum status_type const type = *cp++; // increment cp to length field
-
-    if(type == EOL)
-      break; // end of list, no length
-
-    unsigned int optlen = *cp++;
-    if(optlen & 0x80){
-      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
-      int length_of_length = optlen & 0x7f;
-      optlen = 0;
-      while(length_of_length > 0){
-	optlen <<= 8;
-	optlen |= *cp++;
-	length_of_length--;
-      }
-    }
-    if(cp + optlen >= buffer + length)
-      break; // invalid length; we can't continue to scan
+    enum status_type type;
+    unsigned int optlen;
+    if(tlv_parse(&cp,buffer + length,&type,&optlen) <= 0)
+      break; // EOL, end of buffer, or malformed/truncated option
 
     assert(type != EOL);
     switch(type){
@@ -236,7 +223,10 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case OUTPUT_SAMPRATE:
       // Restart the demodulator to recalculate filters, etc
       {
-	int const new_sample_rate = round_samprate(decode_int(cp,optlen)); // Force to multiple of block rate
+	unsigned int const requested = (unsigned int)decode_int(cp,optlen);
+	if(requested == 0 || requested > chan->frontend->samprate)
+	  break; // can't output faster than the front end
+	int const new_sample_rate = round_samprate(requested); // Force to multiple of block rate
 	if(new_sample_rate == 0)
 	  break;
 	// If using Opus, ignore unsupported sample rates
@@ -275,7 +265,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	double const f = decode_double(cp,optlen);
 	if(isnan(f) || !isfinite(f) || f == 0)
 	  break;
-	set_first_LO(chan,fabs(f)); // Will ignore it if there's no change
+	set_first_LO_locked(chan,fabs(f)); // Will ignore it if there's no change
       }
       break;
     case SHIFT_FREQUENCY: // Hz
@@ -305,7 +295,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case LOW_EDGE: // Hz
       {
 	double const f = decode_float(cp,optlen);
-	if(isnan(f) || !isfinite(f) || f == chan->filter.min_IF || f > chan->filter.max_IF)
+	if(isnan(f) || !isfinite(f) || f == chan->filter.min_IF || f >= chan->filter.max_IF)
 	  break;
 	chan->filter.min_IF = max(f,-(double)chan->output.samprate/2);
 	new_filter_needed = true;
@@ -314,7 +304,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case HIGH_EDGE: // Hz
       {
 	double const f = decode_float(cp,optlen);
-	if(isnan(f) || !isfinite(f) || f == chan->filter.max_IF || f < chan->filter.min_IF)
+	if(isnan(f) || !isfinite(f) || f == chan->filter.max_IF || f <= chan->filter.min_IF)
 	  break;
 	chan->filter.max_IF = min(f,(double)chan->output.samprate/2);
 	new_filter_needed = true;
@@ -322,7 +312,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       break;
     case KAISER_BETA: // dimensionless, always 0 or positive
         {
-	  double const f = fabs(decode_float(cp,optlen));
+	  double const f = min(fabs(decode_float(cp,optlen)),MAX_KAISER_BETA);
 	  if(isnan(f) || !isfinite(f) || chan->filter.kaiser_beta == f)
 	    break;
 	  chan->filter.kaiser_beta = f;
@@ -331,7 +321,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       break;
     case FILTER2_KAISER_BETA: // dimensionless, always 0 or positive
         {
-	  double const f = fabs(decode_float(cp,optlen));
+	  double const f = min(fabs(decode_float(cp,optlen)),MAX_KAISER_BETA);
 	  if(isnan(f) || !isfinite(f) || chan->filter2.kaiser_beta == f)
 	    break;
 	  chan->filter2.kaiser_beta = f;
@@ -485,7 +475,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case RESOLUTION_BW:
       {
 	double const x = fabs(decode_float(cp,optlen));
-	if(isnan(x) || !isfinite(x) || x == chan->spectrum.rbw)
+	if(isnan(x) || !isfinite(x) || x < MIN_RESOLUTION_BW || x == chan->spectrum.rbw)
 	  break;
 	if(Verbose > 1)
 	  fprintf(stderr,"%s bin bw %'.1lf -> %'.1lf Hz\n",chan->name,chan->spectrum.rbw,x);
@@ -494,8 +484,8 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       break;
     case BIN_COUNT:
       {
-	int const x = abs(decode_int(cp,optlen));
-	if(x <= 0 || x == chan->spectrum.bin_count)
+	int const x = abs(decode_int(cp,optlen)); // abs(INT_MIN) stays negative and is rejected below
+	if(x <= 0 || x > MAX_BIN_COUNT || x == chan->spectrum.bin_count)
 	  break;
 	if(Verbose > 1)
 	  fprintf(stderr,"%s bin count %d -> %d\n",chan->name,chan->spectrum.bin_count,x);
@@ -520,7 +510,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       break;
     case SPECTRUM_SHAPE: // Kaiser or gaussian
       {
-	double const x = fabs(decode_float(cp,optlen)); // always positive
+	double const x = min(fabs(decode_float(cp,optlen)),MAX_KAISER_BETA); // always positive
 	if(isnan(x) || !isfinite(x) || x == chan->spectrum.shape)
 	  break;
 	chan->spectrum.shape = x;
@@ -531,6 +521,8 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	int x = abs(decode_int(cp,optlen));
 	if(x <= 0)
 	  x = 1; // Minimum 1
+	if(x > MAX_SPECTRUM_AVG)
+	  x = MAX_SPECTRUM_AVG;
 	if(x == chan->spectrum.fft_avg)
 	  break;
 	chan->spectrum.fft_avg = x;
@@ -825,8 +817,20 @@ static unsigned long encode_radio_status(struct frontend const *frontend,struct 
     encode_float(&bp, SPECTRUM_OVERLAP, chan->spectrum.overlap);
     // encode bin data here? maybe change this, it can be a lot
     // Also need to unwrap this, frequency data is dc....max positive max negative...least negative
-    if(chan->spectrum.bin_data == NULL)
+    if(chan->spectrum.bin_data == NULL || chan->spectrum.bin_count <= 0)
       break;
+    {
+      // Bin data can be large; skip it rather than overrun the packet buffer
+      // Reserve room for the trailing fields encoded below (< 64 bytes) and generous TLV headers
+      size_t const used = (size_t)(bp - packet);
+      size_t const reserve = 128;
+      size_t const need = (size_t)chan->spectrum.bin_count * (chan->demod_type == SPECT_DEMOD ? sizeof(float) : 1);
+      if(used + reserve + need > len){
+	if(Verbose)
+	  fprintf(stderr,"%s: %d spectrum bins don't fit in a status packet, omitted\n",chan->name,chan->spectrum.bin_count);
+	break;
+      }
+    }
     if(chan->demod_type == SPECT_DEMOD)
       encode_vector(&bp,BIN_DATA,chan->spectrum.bin_data,chan->spectrum.bin_count);
     else {
@@ -839,8 +843,8 @@ static unsigned long encode_radio_status(struct frontend const *frontend,struct 
 	encode_float(&bp,SPECTRUM_STEP, chan->spectrum.step);
 	encode_byte_data(chan,bins);
 	encode_string(&bp,BIN_BYTE_DATA,bins,chan->spectrum.bin_count);
-	free(bins);
       }
+      free(bins); // was leaked when base or step wasn't valid
     }
     break;
   default:

@@ -71,6 +71,8 @@ static char const *HackRF_keys[] = {
   "description",
   "device",
   "frequency",
+  "if-gain",  // older synonym for vga-gain
+  "index",
   "library",
   "lna-gain",
   "mixer-gain",
@@ -202,7 +204,8 @@ int hackrf_setup(struct frontend * const frontend,dictionary const * const dicti
     hackrf_exit();
     return -1;
   }
-  sdr->if_gain = config_getint(dictionary, section, "if-gain", -1);
+  // "vga-gain" is the documented key (it was listed but never read); accept "if-gain" too
+  sdr->if_gain = config_getint(dictionary, section, "vga-gain", config_getint(dictionary, section, "if-gain", -1));
   if(sdr->if_gain != -1)
     sdr->software_agc = false;
   else
@@ -358,7 +361,7 @@ static int rx_callback(hackrf_transfer *transfer){
   // estimates of DC offset, signal powers and phase error
   if(sampcount != 0)
     sdr->DC += DC_alpha * (samp_sum - sampcount*sdr->DC);
-  double block_energy = 0.5 * (i_energy + q_energy); // Normalize for complex pairs
+  double block_energy = i_energy + q_energy; // |s|^2, as the other complex drivers and scale_ADpower2FS() assume (0.5x read 3 dB low)
 
   // These blocks are kinda small, so exponentially smooth the power readings
   frontend->if_power += sampcount * rate_factor * (block_energy/sampcount - frontend->if_power);
@@ -478,8 +481,10 @@ double hackrf_tune(struct frontend * const frontend,double const frequency){
 
   uint64_t intfreq = frequency;
   int ret = hackrf_set_freq(sdr->device,intfreq);
-  assert(ret == HACKRF_SUCCESS);
-  (void)ret;
+  if(ret != HACKRF_SUCCESS){
+    fprintf(stderr,"hackrf_set_freq(%llu): %s\n",(unsigned long long)intfreq,hackrf_error_name(ret));
+    return frontend->frequency; // unchanged
+  }
   frontend->frequency = frequency;
   return frequency;
 }

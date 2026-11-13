@@ -189,6 +189,7 @@ double decode_double(uint8_t const *,int);
 struct sockaddr *decode_socket(void *,uint8_t const *,int);
 struct sockaddr *decode_local_socket(void *,uint8_t const *,int);
 char *decode_string(uint8_t const *,int);
+int tlv_parse(uint8_t const **cpp,uint8_t const *end,enum status_type *type,unsigned int *optlen);
 uint32_t get_ssrc(uint8_t const *buffer,int length);
 uint32_t get_tag(uint8_t const *buffer,int length);
 

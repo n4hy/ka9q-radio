@@ -62,7 +62,7 @@ int avahi_start(char const *service_name,char const *service_type,int const serv
 #endif
       execlp("avahi-publish-service", "avahi-publish-service", "--no-fail", host_string, service_name, service_type, port_string, description, pid_string, source_string, NULL);
       perror("exec avahi publish service failed");
-      return -1;
+      _exit(127); // never return into radiod from the forked child
     }
   }
   if(address != 0){
@@ -86,7 +86,7 @@ int avahi_start(char const *service_name,char const *service_type,int const serv
 #endif
 	execlp("avahi-publish-address", "avahi-publish-address",dns_name,ip_address_string, NULL);
 	perror("exec avahi publish address");
-	return -1;
+	_exit(127); // never return into radiod from the forked child
       }
     }
   }

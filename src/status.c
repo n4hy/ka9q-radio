@@ -204,11 +204,49 @@ size_t encode_vector(uint8_t **bp,enum status_type type,float const *array,size_
 // Now allocates the result from the heap, the caller must free.
 // OTOH, the caller doesn't have to figure out a buffer size anymore
 char *decode_string(uint8_t const *cp,int optlen){
-  char *result = malloc(optlen+1);
-  if(result != NULL)
-    memcpy(result,cp,optlen);
+  if(optlen < 0)
+    optlen = 0;
+  char *result = malloc((size_t)optlen+1);
+  if(result == NULL)
+    return NULL;
+  memcpy(result,cp,optlen);
   result[optlen] = '\0'; // force null termination
   return result;
+}
+
+// Parse one TLV header at *cpp, never reading at or beyond 'end'
+// Returns 1 and sets *type, *optlen with *cpp -> value field when a complete option is present
+// Returns 0 at EOL or end of buffer, -1 if the header or value is truncated or malformed
+// On success the caller must still advance *cpp by *optlen to reach the next option
+int tlv_parse(uint8_t const **cpp,uint8_t const *end,enum status_type *type,unsigned int *optlen){
+  uint8_t const *cp = *cpp;
+  if(cp >= end)
+    return 0;
+  *type = (enum status_type)*cp++;
+  if(*type == EOL){
+    *cpp = cp;
+    return 0;
+  }
+  if(cp >= end)
+    return -1;
+  unsigned int len = *cp++;
+  if(len & 0x80){
+    // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits
+    int length_of_length = len & 0x7f;
+    if(length_of_length > (int)sizeof(len))
+      return -1; // can't be valid in a datagram
+    len = 0;
+    while(length_of_length-- > 0){
+      if(cp >= end)
+	return -1;
+      len = (len << 8) | *cp++;
+    }
+  }
+  if(len > (size_t)(end - cp))
+    return -1; // value would run past end of buffer
+  *optlen = len;
+  *cpp = cp;
+  return 1;
 }
 
 

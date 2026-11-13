@@ -98,7 +98,9 @@ int demod_linear(void *arg){
       // ie, reference RTP timestamp 0 to the first radiod block
       double const block_rate = frontend->samprate / frontend->L; // eg Fs 126 MHz * 20 ms = 2,520,000 samples
       uint32_t const first_block = chan->filter.out.next_jobnum - 1; // radiod starts with jobnum 0
-      chan->output.rtp.timestamp = (int32_t)(first_block * (chan->output.samprate / block_rate));
+      // RTP timestamps are modulo 2^32. Converting the full product to int32_t was undefined
+      // once it exceeded 2^31 (after ~12.4 h of uptime at 48 kHz)
+      chan->output.rtp.timestamp = (uint32_t)llrint(fmod((double)first_block * (chan->output.samprate / block_rate), 4294967296.0));
       if(Verbose > 0)
 	fprintf(stderr,"%s starting at FFT jobum %u, preset RTP TS to %u\n",chan->name,first_block,chan->output.rtp.timestamp);
       first_run = true;
@@ -133,7 +135,8 @@ int demod_linear(void *arg){
 	  } else {
 	    double r = creal(s);
 	    double i = cimag(s);
-	    phase = r * i / (r*r - i*i);
+	    double const d = r*r - i*i;
+	    phase = (d != 0) ? r * i / d : 0; // a zero sample gave 0/0 = NaN, which stuck in the PLL integrator forever
 	  }
 	} else {
 	  // unlocked
@@ -218,6 +221,8 @@ int demod_linear(void *arg){
 	// Divide into 2 ms slices. Hopefully divides evenly (it does for the usual sampling rates and block times)
 	// Should handle fractions if that ever happens
 	int samples_per_slice = lrint(N * .002 / Blocktime);
+	if(samples_per_slice < 1)
+	  samples_per_slice = 1; // avoid an infinite loop below
 	int n = 0;
 	while(n + samples_per_slice < N){ // ignore any fragment at end
 	  double energy = 0;

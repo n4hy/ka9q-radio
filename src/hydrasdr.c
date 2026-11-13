@@ -907,9 +907,11 @@ static double set_correct_freq(struct sdrstate * const sdr,double const freq){
   struct frontend * const frontend = sdr->frontend;
   // sdr->converter refers to an upconverter, so it's added to the frequency we request
   int64_t const intfreq = lrint((freq + sdr->converter)/ (1 + frontend->calibrate));
-  int ret __attribute__((unused)) = HYDRASDR_SUCCESS; // Won't be used when asserts are disabled
-  ret = hydrasdr_set_freq(sdr->device,(uint64_t)(intfreq - sdr->offset));
-  assert(ret == HYDRASDR_SUCCESS);
+  int const ret = hydrasdr_set_freq(sdr->device,(uint64_t)(intfreq - sdr->offset));
+  if(ret != HYDRASDR_SUCCESS){
+    fprintf(stderr,"hydrasdr_set_freq(%lld): error %d\n",(long long)(intfreq - sdr->offset),ret);
+    return frontend->frequency; // unchanged
+  }
   double const tf = true_freq(intfreq);
   frontend->frequency = tf * (1 + frontend->calibrate) - sdr->converter;
   return frontend->frequency;

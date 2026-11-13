@@ -190,12 +190,14 @@ int output_mcast(void const * const group, char const * const iface, int const t
       mreqn.imr_ifindex = if_index;
       if (setsockopt(fd,  IPPROTO_IP,  IP_MULTICAST_IF, &mreqn, sizeof mreqn) < 0){
 	fprintf(stderr,"set up IPv4 multicast output to iface %s failed: %s",iface,strerror(errno));
+	close(fd); // was leaked
 	return -1;
       }
     } else { // iface set && IPv6
       // IPv6 is actually simpler! Amazing!
       if (setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &if_index, sizeof if_index) < 0){
 	fprintf(stderr,"set up IPv6 multicast output to iface %s failed: %s",iface,strerror(errno));
+	close(fd); // was leaked
 	return -1;
       }
     }
@@ -213,7 +215,8 @@ int connect_mcast(void const * const s, char const * const iface, int const ttl,
   if(fd == -1)
     return -1;
 
-  if(connect(fd, s, sizeof(struct sockaddr)) == -1){
+  socklen_t const slen = ((struct sockaddr const *)s)->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+  if(connect(fd, s, slen) == -1){ // sizeof(struct sockaddr) is too short for IPv6
     fprintf(stderr,"connect(socket=%s,iface=%s,ttl=%d,tos=%d) failed: %s\n",
 	    formatsock(s,false),iface,ttl,tos,strerror(errno));
     close(fd);
@@ -260,7 +263,8 @@ int listen_mcast(void const *source, void const *group, char const *iface){
     fprintf(stderr,"listen_mcast socket set IP_FREEBIND %d failed: %s\n",freebind,strerror(errno));
 #endif
 
-  if((bind(fd, group_socket, sizeof(struct sockaddr)) != 0)){
+  socklen_t const glen = ((struct sockaddr const *)group_socket)->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+  if((bind(fd, group_socket, glen) != 0)){ // sizeof(struct sockaddr) is too short for IPv6
     fprintf(stderr,"listen_mcast bind to %s failed: %s\n",formatsock(group_socket,false),strerror(errno));
     close(fd);
     return -1;
@@ -335,8 +339,10 @@ int resolve_mcast(char const *group, void *group_sock, uint16_t default_port, ch
       }
     }
   }
-  if(message_logged && try == tries){
-    fprintf(stderr, "resolve_mcast getaddrinfo(host=%s, port=%s) failed\n", full_host, port);
+  if(tries != 0 && try == tries){
+    // All tries failed (results is NULL), whether or not the 2-second message was logged
+    if(message_logged)
+      fprintf(stderr, "resolve_mcast getaddrinfo(host=%s, port=%s) failed\n", full_host, port);
     return -1;
   }
   if(message_logged) // Don't leave them hanging: report success after failure

@@ -17,22 +17,10 @@ int decode_radio_status(struct frontend *frontend,struct channel *channel,uint8_
     return 0;
   uint8_t const *cp = buffer;
   while(cp  < &buffer[length]){
-    enum status_type type = *cp++; // increment to length field
-    if(type == EOL)
-      break; // end of list
-    unsigned int optlen = *cp++;
-    if(optlen & 0x80){
-      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
-      int length_of_length = optlen & 0x7f;
-      optlen = 0;
-      while(length_of_length > 0){
-	optlen <<= 8;
-	optlen |= *cp++;
-	length_of_length--;
-      }
-    }
-    if(cp >= &buffer[length])
-      break; // invalid length; we can't continue to scan
+    enum status_type type;
+    unsigned int optlen;
+    if(tlv_parse(&cp,&buffer[length],&type,&optlen) <= 0)
+      break; // EOL, end of buffer, or malformed/truncated option
     switch(type){
     case EOL:
       break;
@@ -42,7 +30,8 @@ int decode_radio_status(struct frontend *frontend,struct channel *channel,uint8_
     case DESCRIPTION:
       {
 	char *str = decode_string(cp,optlen);
-	strlcpy(frontend->description,str,sizeof(frontend->description)); // should enforce null termination
+	if(str != NULL)
+	  strlcpy(frontend->description,str,sizeof(frontend->description)); // should enforce null termination
 	FREE(str);
       }
       break;
@@ -303,7 +292,8 @@ int decode_radio_status(struct frontend *frontend,struct channel *channel,uint8_
     case PRESET:
       {
 	char *p = decode_string(cp,optlen);
-	strlcpy(channel->preset,p,sizeof(channel->preset)); // should enforce null termination
+	if(p != NULL)
+	  strlcpy(channel->preset,p,sizeof(channel->preset)); // should enforce null termination
 	FREE(p);
       }
       break;
@@ -374,22 +364,10 @@ uint32_t get_ssrc(uint8_t const *buffer,int length){
     return 0;
   uint8_t const *cp = buffer;
   while(cp < &buffer[length]){
-    enum status_type const type = *cp++; // increment cp to length field
-    if(type == EOL)
-      break; // end of list, no length
-    unsigned int optlen = *cp++;
-    if(optlen & 0x80){
-      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
-      int length_of_length = optlen & 0x7f;
-      optlen = 0;
-      while(length_of_length > 0){
-	optlen <<= 8;
-	optlen |= *cp++;
-	length_of_length--;
-      }
-    }
-    if(cp + optlen >= buffer + length)
-      break; // invalid length; we can't continue to scan
+    enum status_type type;
+    unsigned int optlen;
+    if(tlv_parse(&cp,buffer + length,&type,&optlen) <= 0)
+      break; // EOL, end of buffer, or malformed/truncated option
     switch(type){
     case EOL: // Shouldn't get here
       goto done;
@@ -410,22 +388,10 @@ uint32_t get_tag(uint8_t const *buffer,int length){
     return 0;
   uint8_t const *cp = buffer;
   while(cp < buffer + length){
-    enum status_type const type = *cp++; // increment cp to length field
-    if(type == EOL)
-      break; // end of list, no length
-    unsigned int optlen = *cp++;
-    if(optlen & 0x80){
-      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
-      int length_of_length = optlen & 0x7f;
-      optlen = 0;
-      while(length_of_length > 0){
-	optlen <<= 8;
-	optlen |= *cp++;
-	length_of_length--;
-      }
-    }
-    if(cp + optlen >= buffer + length)
-      break; // invalid length; we can't continue to scan
+    enum status_type type;
+    unsigned int optlen;
+    if(tlv_parse(&cp,buffer + length,&type,&optlen) <= 0)
+      break; // EOL, end of buffer, or malformed/truncated option
     switch(type){
     case EOL: // Shouldn't get here
       goto done;

@@ -350,7 +350,9 @@ double fobos_gain(struct frontend * const frontend, double gain){
   }
   if(vgain > 63)
     vgain = 63;
-  vgain /= 2; // into 2 dB steps
+  if(vgain < 0)
+    vgain = 0;
+  vgain = floor(vgain / 2); // into 2 dB steps; report what is actually set below (was the untruncated value)
 
   frontend->rf_agc = false;
   frontend->rf_gain = gain;
@@ -370,6 +372,7 @@ double fobos_gain(struct frontend * const frontend, double gain){
 	    result);
   }
   frontend->rf_gain = 2 * vgain + (lna == 2 ? 16.0 : lna == 3 ? 33.0 : 0);
+  sdr->scale = scale_AD(frontend); // keep 0 dBm -> 0 dBFS after a gain change, as at startup
   return frontend->rf_gain;
 }
 
@@ -457,6 +460,8 @@ double fobos_tune(struct frontend *const frontend, double const freq) {
   struct sdrstate *const sdr = (struct sdrstate *)frontend->context;
   if(sdr->direct_sampling)
     return 0.0; // No tuning in direct sample mode
+  if(frontend->lock)
+    return frontend->frequency; // Don't change if locked
 
 
   if(Verbose)
@@ -466,8 +471,8 @@ double fobos_tune(struct frontend *const frontend, double const freq) {
   if (result != 0) {
     fprintf(stderr, "fobos_rx_set_frequency failed with error code: %d\n",
             result);
-    fobos_rx_close(sdr->dev);
-    return frequency_actual;
+    // Don't close the device here: it is streaming, and the async read callback still uses the handle
+    return frontend->frequency; // unchanged
   }
   frontend->frequency = frequency_actual;
   return frontend->frequency;

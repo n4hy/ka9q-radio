@@ -45,7 +45,7 @@ void set_osc(struct osc *osc,double f,double r){
   }
 }
 
-static inline void renorm_osc(struct osc *osc){
+void renorm_osc(struct osc *osc){
   if(!is_phasor_init(osc->phasor))
     osc->phasor = 1; // In case we've been stepping an uninitialized osc
 
@@ -59,16 +59,7 @@ static inline void renorm_osc(struct osc *osc){
 }
 
 // Step oscillator through one sample, return complex phase
-double complex step_osc(struct osc *osc){
-  if(--osc->steps <= 0)   // do first, in case osc is not initialized
-    renorm_osc(osc);
-  double complex const r = osc->phasor;
-  if(osc->rate != 0)
-    osc->phasor_step *= osc->phasor_step_step;
-
-  osc->phasor *= osc->phasor_step;
-  return r;
-}
+// step_osc() is now static inline in osc.h
 
 // Sine lookup table
 

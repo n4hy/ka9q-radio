@@ -601,17 +601,22 @@ static int select_device(struct sdrstate *sdr){
 
 static double set_center_freq(struct sdrstate *sdr,double const frequency){
   struct frontend * const frontend = sdr->frontend;
-  double const calibrated_frequency = frequency * (1 + frontend->calibrate);
-  sdr->rx_channel_params->tunerParams.rfFreq.rfHz = calibrated_frequency;
+  // calibrate is the clock error ratio (+1e-6 = 1 ppm high, radio.h), so the LO really runs at programmed * (1 + calibrate).
+  // Program frequency / (1 + calibrate) to land on frequency, as airspy, hydrasdr and rtlsdr do
+  // (this used to program and report frequency * (1 + calibrate), doubling the error instead of cancelling it)
+  double const programmed = frequency / (1 + frontend->calibrate);
+  double const old_rfHz = sdr->rx_channel_params->tunerParams.rfFreq.rfHz;
+  sdr->rx_channel_params->tunerParams.rfFreq.rfHz = programmed;
   if(sdr->device_status & DEVICE_STREAMING){
     sdrplay_api_ErrT err;
     err = sdrplay_api_Update(sdr->device.dev,sdr->device.tuner,sdrplay_api_Update_Tuner_Frf,sdrplay_api_Update_Ext1_None);
     if(err != sdrplay_api_Success){
       fprintf(stderr,"sdrplay_api_Update(Tuner_Frf) failed: %s\n",sdrplay_api_GetErrorString(err));
-      return -1;
+      sdr->rx_channel_params->tunerParams.rfFreq.rfHz = old_rfHz;
+      return frontend->frequency; // unchanged (was -1, which callers took as a frequency)
     }
   }
-  frontend->frequency = calibrated_frequency;
+  frontend->frequency = programmed * (1 + frontend->calibrate);
   return frontend->frequency;
 }
 
@@ -1145,15 +1150,13 @@ static void rx_callback(int16_t *xi,int16_t *xq,sdrplay_api_StreamCbParamsT *par
     realtime(2 + default_prio()); // do this once
   }
 
-  if(sdr->next_sample_num && params->firstSampleNum != sdr->next_sample_num){
-    unsigned int dropped_samples;
-    if(sdr->next_sample_num < params->firstSampleNum)
-      dropped_samples = params->firstSampleNum - sdr->next_sample_num;
-    else
-      dropped_samples = UINT_MAX - (params->firstSampleNum - sdr->next_sample_num) + 1;
-    sdr->next_sample_num = params->firstSampleNum + numSamples;
-    fprintf(stderr,"dropped %'d\n",dropped_samples);
+  // next_sample_num was only updated inside this test, so it stayed 0 and drops were never detected.
+  // 0 still means "not yet known"
+  if(!reset && sdr->next_sample_num != 0 && params->firstSampleNum != sdr->next_sample_num){
+    unsigned int const dropped_samples = params->firstSampleNum - sdr->next_sample_num; // modulo 2^32
+    fprintf(stderr,"dropped %'u\n",dropped_samples);
   }
+  sdr->next_sample_num = params->firstSampleNum + numSamples;
 
   int const sampcount = numSamples;
   float complex * const wptr = frontend->in.input_write_pointer.c;

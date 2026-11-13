@@ -46,6 +46,7 @@ struct sdrstate
   pthread_mutex_t queue_mutex;
   pthread_cond_t  queue_cond;
   _Atomic enum state state;
+  double scale;   // Raw 12-bit samples -> nominal +/-1 with analog gain correction, as other drivers do
 };
 
 static char const *Bladerf_keys[] = {
@@ -156,8 +157,9 @@ int bladerf_setup(struct frontend * const frontend,
 	if (Verbose)
 		fprintf(stderr, "Set bandwidth %'u Hz\n", bw_actual);
 	frontend->calibrate = 0;
-	frontend->max_IF = +frontend->samprate;
-	frontend->min_IF = -frontend->samprate;
+	// Complex sampling covers only +/- samprate/2; also stay inside the analog filter
+	frontend->max_IF = bw_actual > 0 ? min(0.5 * bw_actual, 0.5 * frontend->samprate) : 0.5 * frontend->samprate;
+	frontend->min_IF = -frontend->max_IF;
 
 	frontend->rf_gain = config_getint(Dictionary, section, "gain",0);
 	if (Verbose)
@@ -216,6 +218,7 @@ static void bladerf_process(struct frontend * const frontend,
 {
 	float complex * const wptr = frontend->in.input_write_pointer.c;
 	double energy = 0;
+	double const sdr_scale = ((struct sdrstate const *)frontend->context)->scale;
 
 	const int16_t *sample = (const int16_t *)samples;
 	for (size_t i=0; i < num_samples; i++) {
@@ -232,8 +235,8 @@ static void bladerf_process(struct frontend * const frontend,
 		if (s & 0x800)
 			s |= 0xf000;
 		__imag__ samp = s;
-		energy += cnrm(samp);
-		wptr[i] = (float complex)samp;
+		energy += cnrm(samp); // raw units; if_power is converted with scale_ADpower2FS()
+		wptr[i] = (float complex)(sdr_scale * samp);
 		sample += 2;
 	}
 	if(num_samples != 0 && !isnan(energy) && isfinite(energy))
@@ -250,7 +253,9 @@ static void *bladerf_main(void *p)
 	pthread_setname("bladerf-main");
 
 	realtime(2 + default_prio());
-	while (atomic_load(&sdr->state) == RUNNING) {
+	enum state s;
+	// Created while state is still STARTING, so accept that too (it used to exit immediately if it got here first)
+	while ((s = atomic_load(&sdr->state)) == RUNNING || s == STARTING) {
 		pthread_mutex_lock(&sdr->queue_mutex);
 		if (sdr->idx_to_process != sdr->idx_to_fill) {
 			pthread_mutex_unlock(&sdr->queue_mutex);
@@ -281,6 +286,7 @@ int bladerf_startup(struct frontend * const frontend)
     usleep(10000); // 10 ms
   }
   frontend->in.perform_inline = true;
+  sdr->scale = scale_AD(frontend);
   sdr->num_buffers = 128;
   sdr->num_transfers = 2;
   sdr->idx_to_fill = 0;
@@ -313,8 +319,8 @@ int bladerf_stop(struct frontend * const frontend){
       return 0;
     usleep(10000);
   }
-  pthread_join(&sdr->main_thread, NULL);
-  pthread_join(&sdr->monitor_thread, NULL);
+  pthread_join(sdr->main_thread, NULL);
+  pthread_join(sdr->monitor_thread, NULL);
   atomic_store(&sdr->state,STOPPED);
   fprintf(stderr,"bladerf stopped\n");
   return 0;
@@ -432,20 +438,20 @@ static void *bladerf_monitor(void *p)
 
 static double set_correct_freq(struct sdrstate * const sdr, double const freq)
 {
-	uint32_t f = freq;
+	bladerf_frequency const f = (bladerf_frequency)llrint(freq); // uint64_t; uint32_t wrapped above 4.295 GHz
 	int status = bladerf_set_frequency(sdr->dev, BLADERF_MODULE_RX, f);
 
 	if (status != 0) {
 		fprintf(stderr,
-			"Failed to set RX frequency to %u %s\n",
-			f, bladerf_strerror(status));
+			"Failed to set RX frequency to %llu %s\n",
+			(unsigned long long)f, bladerf_strerror(status));
 		sdr->frontend->frequency = 0.0;
 	} else {
 		sdr->frontend->frequency = freq;
 	}
 
 	if (Verbose)
-		fprintf(stderr,"tuned to %d\n", f);
+		fprintf(stderr,"tuned to %llu\n", (unsigned long long)f);
 
 	return sdr->frontend->frequency;
 }
