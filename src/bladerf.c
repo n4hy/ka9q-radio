@@ -156,8 +156,9 @@ int bladerf_setup(struct frontend * const frontend,
 	if (Verbose)
 		fprintf(stderr, "Set bandwidth %'u Hz\n", bw_actual);
 	frontend->calibrate = 0;
-	frontend->max_IF = +frontend->samprate;
-	frontend->min_IF = -frontend->samprate;
+	// Complex sampling covers only +/- samprate/2; also stay inside the analog filter
+	frontend->max_IF = bw_actual > 0 ? min(0.5 * bw_actual, 0.5 * frontend->samprate) : 0.5 * frontend->samprate;
+	frontend->min_IF = -frontend->max_IF;
 
 	frontend->rf_gain = config_getint(Dictionary, section, "gain",0);
 	if (Verbose)
@@ -250,7 +251,9 @@ static void *bladerf_main(void *p)
 	pthread_setname("bladerf-main");
 
 	realtime(2 + default_prio());
-	while (atomic_load(&sdr->state) == RUNNING) {
+	enum state s;
+	// Created while state is still STARTING, so accept that too (it used to exit immediately if it got here first)
+	while ((s = atomic_load(&sdr->state)) == RUNNING || s == STARTING) {
 		pthread_mutex_lock(&sdr->queue_mutex);
 		if (sdr->idx_to_process != sdr->idx_to_fill) {
 			pthread_mutex_unlock(&sdr->queue_mutex);
@@ -313,8 +316,8 @@ int bladerf_stop(struct frontend * const frontend){
       return 0;
     usleep(10000);
   }
-  pthread_join(&sdr->main_thread, NULL);
-  pthread_join(&sdr->monitor_thread, NULL);
+  pthread_join(sdr->main_thread, NULL);
+  pthread_join(sdr->monitor_thread, NULL);
   atomic_store(&sdr->state,STOPPED);
   fprintf(stderr,"bladerf stopped\n");
   return 0;
@@ -432,20 +435,20 @@ static void *bladerf_monitor(void *p)
 
 static double set_correct_freq(struct sdrstate * const sdr, double const freq)
 {
-	uint32_t f = freq;
+	bladerf_frequency const f = (bladerf_frequency)llrint(freq); // uint64_t; uint32_t wrapped above 4.295 GHz
 	int status = bladerf_set_frequency(sdr->dev, BLADERF_MODULE_RX, f);
 
 	if (status != 0) {
 		fprintf(stderr,
-			"Failed to set RX frequency to %u %s\n",
-			f, bladerf_strerror(status));
+			"Failed to set RX frequency to %llu %s\n",
+			(unsigned long long)f, bladerf_strerror(status));
 		sdr->frontend->frequency = 0.0;
 	} else {
 		sdr->frontend->frequency = freq;
 	}
 
 	if (Verbose)
-		fprintf(stderr,"tuned to %d\n", f);
+		fprintf(stderr,"tuned to %llu\n", (unsigned long long)f);
 
 	return sdr->frontend->frequency;
 }

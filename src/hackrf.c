@@ -71,6 +71,8 @@ static char const *HackRF_keys[] = {
   "description",
   "device",
   "frequency",
+  "if-gain",  // older synonym for vga-gain
+  "index",
   "library",
   "lna-gain",
   "mixer-gain",
@@ -202,7 +204,8 @@ int hackrf_setup(struct frontend * const frontend,dictionary const * const dicti
     hackrf_exit();
     return -1;
   }
-  sdr->if_gain = config_getint(dictionary, section, "if-gain", -1);
+  // "vga-gain" is the documented key (it was listed but never read); accept "if-gain" too
+  sdr->if_gain = config_getint(dictionary, section, "vga-gain", config_getint(dictionary, section, "if-gain", -1));
   if(sdr->if_gain != -1)
     sdr->software_agc = false;
   else
@@ -478,8 +481,10 @@ double hackrf_tune(struct frontend * const frontend,double const frequency){
 
   uint64_t intfreq = frequency;
   int ret = hackrf_set_freq(sdr->device,intfreq);
-  assert(ret == HACKRF_SUCCESS);
-  (void)ret;
+  if(ret != HACKRF_SUCCESS){
+    fprintf(stderr,"hackrf_set_freq(%llu): %s\n",(unsigned long long)intfreq,hackrf_error_name(ret));
+    return frontend->frequency; // unchanged
+  }
   frontend->frequency = frequency;
   return frequency;
 }

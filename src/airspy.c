@@ -344,7 +344,7 @@ int airspy_shutdown(struct frontend * const frontend){
       return 0;
     usleep(10000);
   }
-  pthread_join(sdr->cmd_thread,NULL);
+  // (cmd_thread is never created; joining its zero id crashed glibc)
   pthread_join(sdr->monitor_thread,NULL);
   atomic_store(&sdr->state,STOPPED);
   fprintf(stderr,"airspy stopped\n");
@@ -512,9 +512,11 @@ static double set_correct_freq(struct sdrstate * const sdr,double const freq){
   struct frontend * const frontend = sdr->frontend;
   // sdr->converter refers to an upconverter, so it's added to the frequency we request
   int64_t const intfreq = lrint((freq + sdr->converter)/ (1 + frontend->calibrate));
-  int ret __attribute__((unused)) = AIRSPY_SUCCESS; // Won't be used when asserts are disabled
-  ret = airspy_set_freq(sdr->device,(uint32_t)(intfreq - sdr->offset));
-  assert(ret == AIRSPY_SUCCESS);
+  int const ret = airspy_set_freq(sdr->device,(uint32_t)(intfreq - sdr->offset));
+  if(ret != AIRSPY_SUCCESS){
+    fprintf(stderr,"airspy_set_freq(%lld): %s\n",(long long)(intfreq - sdr->offset),airspy_error_name(ret));
+    return frontend->frequency; // unchanged
+  }
   double const tf = true_freq(intfreq);
   frontend->frequency = tf * (1 + frontend->calibrate) - sdr->converter;
   return frontend->frequency;

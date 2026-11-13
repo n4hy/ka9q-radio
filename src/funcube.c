@@ -362,7 +362,15 @@ static void do_fcd_agc(struct sdrstate *sdr){
   assert(frontend != NULL);
 
   double const powerdB = power2dB(frontend->if_power * scale_ADpower2FS(frontend));
+  if(powerdB <= AGC_upper && powerdB >= AGC_lower)
+    return; // nothing to do
 
+  // The control handle is closed after setup unless Hold_open; reopen it as funcube_tune() does
+  // (fcdAppSetParam() on a NULL handle crashed in hid_write())
+  if(sdr->phd == NULL && (sdr->phd = fcdOpen(sdr->sdr_name,sizeof(sdr->sdr_name),sdr->number)) == NULL){
+    fprintf(stderr,"fcdOpen(%d): can't re-open control port for AGC\n",sdr->number);
+    return;
+  }
   if(powerdB > AGC_upper){
     if(frontend->if_gain > 0){
       // Decrease gain in 10 dB steps, down to 0
@@ -471,7 +479,7 @@ double funcube_tune(struct frontend * const frontend,double const freq){
   assert(sdr != NULL);
 
   if(frontend->lock)
-    return freq; // Don't change if locked
+    return frontend->frequency; // Don't change if locked; report the frequency actually in use
 
 
   int const intfreq = (int)freq;

@@ -320,7 +320,7 @@ static void *proc_sig_gen(void *arg){
       if(sdr->modulation == CW || sdr->modulation == FM){ // FM to be implemented
 	for(long i=0; i < blocksize; i++){
 	  double complex samp = sdr->amplitude * step_osc(&carrier) + sdr->noise * complex_gauss();
-	  in_energy += samp * samp;
+	  in_energy += cnrm(samp); // samp*samp kept only Re(s^2) = I^2 - Q^2
 	  wptr[i] = samp * sdr->scale;
 	}
       } else {
@@ -337,7 +337,7 @@ static void *proc_sig_gen(void *arg){
 	blocksize = r;
 	for(long i=0; i < blocksize; i++){
 	  double complex samp = (dc + dac_modulation[i]) * sdr->amplitude * step_osc(&carrier) + sdr->noise * real_gauss();
-	  in_energy += samp * samp;
+	  in_energy += cnrm(samp); // samp*samp kept only Re(s^2) = I^2 - Q^2
 	  wptr[i] = samp * sdr->scale;
 	}
       }

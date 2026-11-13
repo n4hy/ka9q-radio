@@ -482,8 +482,9 @@ static double true_freq(uint64_t freq_hz){
 
 static double set_correct_freq(struct sdr * const sdr,double freq){
   struct frontend * const frontend = sdr->frontend;
-  int32_t intfreq = llrint(freq / (1 + frontend->calibrate));
-  rtlsdr_set_center_freq(sdr->device,intfreq);
+  uint32_t const intfreq = (uint32_t)llrint(freq / (1 + frontend->calibrate)); // API takes uint32_t; int32_t wrapped above 2.147 GHz
+  if(rtlsdr_set_center_freq(sdr->device,intfreq) != 0)
+    fprintf(stderr,"rtlsdr_set_center_freq(%u) failed\n",intfreq);
 #ifdef USE_NEW_LIBRTLSDR
   double tf = rtlsdr_get_freq(sdr->device);
 #else
