@@ -601,9 +601,12 @@ static int select_device(struct sdrstate *sdr){
 
 static double set_center_freq(struct sdrstate *sdr,double const frequency){
   struct frontend * const frontend = sdr->frontend;
-  double const calibrated_frequency = frequency * (1 + frontend->calibrate);
+  // calibrate is the clock error ratio (+1e-6 = 1 ppm high, radio.h), so the LO really runs at programmed * (1 + calibrate).
+  // Program frequency / (1 + calibrate) to land on frequency, as airspy, hydrasdr and rtlsdr do
+  // (this used to program and report frequency * (1 + calibrate), doubling the error instead of cancelling it)
+  double const programmed = frequency / (1 + frontend->calibrate);
   double const old_rfHz = sdr->rx_channel_params->tunerParams.rfFreq.rfHz;
-  sdr->rx_channel_params->tunerParams.rfFreq.rfHz = calibrated_frequency;
+  sdr->rx_channel_params->tunerParams.rfFreq.rfHz = programmed;
   if(sdr->device_status & DEVICE_STREAMING){
     sdrplay_api_ErrT err;
     err = sdrplay_api_Update(sdr->device.dev,sdr->device.tuner,sdrplay_api_Update_Tuner_Frf,sdrplay_api_Update_Ext1_None);
@@ -613,7 +616,7 @@ static double set_center_freq(struct sdrstate *sdr,double const frequency){
       return frontend->frequency; // unchanged (was -1, which callers took as a frequency)
     }
   }
-  frontend->frequency = calibrated_frequency;
+  frontend->frequency = programmed * (1 + frontend->calibrate);
   return frontend->frequency;
 }
 
