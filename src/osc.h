@@ -35,7 +35,20 @@ struct pll {
 
 // Osc functions -- complex rotator
 void set_osc(struct osc *osc,double f,double r);
-double complex step_osc(struct osc *osc);
+void renorm_osc(struct osc *osc); // out of line; called every Renorm_rate steps
+
+// Inline: called once per sample per channel in the downconverter. As an out-of-line call
+// it measured 2.60 vs 1.77 ns/sample inline (x86-64, -O3, 48 kHz blocks), same results
+static inline double complex step_osc(struct osc *osc){
+  if(--osc->steps <= 0)   // do first, in case osc is not initialized
+    renorm_osc(osc);
+  double complex const r = osc->phasor;
+  if(osc->rate != 0)
+    osc->phasor_step *= osc->phasor_step_step;
+
+  osc->phasor *= osc->phasor_step;
+  return r;
+}
 
 // Osc functions -- direct digital synthesis (sine lookup table)
 void nco(uint32_t,double *,double *);
