@@ -361,7 +361,7 @@ static int rx_callback(hackrf_transfer *transfer){
   // estimates of DC offset, signal powers and phase error
   if(sampcount != 0)
     sdr->DC += DC_alpha * (samp_sum - sampcount*sdr->DC);
-  double block_energy = 0.5 * (i_energy + q_energy); // Normalize for complex pairs
+  double block_energy = i_energy + q_energy; // |s|^2, as the other complex drivers and scale_ADpower2FS() assume (0.5x read 3 dB low)
 
   // These blocks are kinda small, so exponentially smooth the power readings
   frontend->if_power += sampcount * rate_factor * (block_energy/sampcount - frontend->if_power);
