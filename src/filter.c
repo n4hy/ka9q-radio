@@ -141,6 +141,14 @@ fftwf_plan plan_c2r(int N, float complex *in, float *out){
   }
   return plan;
 }
+// fftwf_destroy_plan() is not thread safe; only fftwf_execute*() is (FFTW 3 manual, "Thread safety")
+void destroy_plan(fftwf_plan plan){
+  if(plan == NULL)
+    return;
+  pthread_mutex_lock(&FFTW_planning_mutex);
+  fftwf_destroy_plan(plan);
+  pthread_mutex_unlock(&FFTW_planning_mutex);
+}
 // Create fast convolution filters
 // The filters are now in two parts, filter_in (the master) and filter_out (the slave)
 // Filter_in holds the original time-domain input and its frequency domain version
@@ -681,7 +689,7 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
   pthread_mutex_unlock(&master->filter_mutex);
   assert(m_fdomain != NULL); // Should always be master frequency data
   // In spectrum mode we'll read directly from the input queue. Don't forget the 3dB scale when the input is real
-  slave->sample_index = master->samples_by_job[slave->next_jobnum % ND];
+  // (sample_index was set above under the lock; re-reading it here, after next_jobnum advanced, picked the wrong slot)
   float complex * restrict const s_fdomain = slave->fdomain;
   float complex const * restrict const s_response = slave->response;
   int const s_bins = slave->bins;
@@ -747,6 +755,13 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
 	if(++wp == s_bins)
 	  wp = 0; // Slave wrapped to DC
       } while (wp != (s_bins+1)/2 && rp != (m_bins+1)/2); // Until we reach the top of the output or input
+      // Zero any remaining output, as in the !beam case (otherwise the previous block's bins are replayed)
+      while(wp != (s_bins+1)/2){
+	assert(wp >=0 && wp < s_bins);
+	s_fdomain[wp++] = 0;
+	if(wp == s_bins)
+	  wp = 0; // Wrap to DC
+      }
     } else { // !beam
       do {
 	assert(rp >= 0 && rp < m_bins);
@@ -881,8 +896,10 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     }
     s_fdomain[0] = 0; // Must be a null at DC
   }
-  // Zero out Nyquist bin
-  s_fdomain[(s_bins+1)/2] = 0; // ?necessary?
+  // Zero out Nyquist bin, which exists only when the FFT size is even
+  // For REAL output s_bins = points/2+1, so Nyquist is the last bin; (s_bins+1)/2 notched ~points/4 (e.g., 12 kHz in WFM mono)
+  if((slave->points & 1) == 0)
+    s_fdomain[slave->out_type == REAL ? s_bins - 1 : s_bins / 2] = 0;
   pthread_mutex_unlock(&slave->response_mutex); // release response[]
   // And finally back to the time domain
   fftwf_execute(slave->rev_plan); // Note: c2r version destroys m_fdomain[], but it's not used again anyway
@@ -908,7 +925,7 @@ int delete_filter_input(struct filter_in * master){
   pthread_mutex_destroy(&master->filter_mutex);
   pthread_cond_destroy(&master->filter_cond);
   if(master->fwd_plan != NULL)
-    fftwf_destroy_plan(master->fwd_plan);
+    destroy_plan(master->fwd_plan);
   master->fwd_plan = NULL;
   mirror_free(&master->input_buffer,master->input_buffer_size); // Don't use free() !
   for(int i=0; i < ND; i++)
@@ -922,7 +939,7 @@ int delete_filter_output(struct filter_out *slave){
   ASSERT_UNLOCKED(&slave->response_mutex);
   pthread_mutex_destroy(&slave->response_mutex);
   if(slave->rev_plan != NULL)
-    fftwf_destroy_plan(slave->rev_plan);
+    destroy_plan(slave->rev_plan);
   slave->rev_plan = NULL;
   // Only one will be non-null but it doesn't hurt to free both
   FREE(slave->output_buffer.c);
@@ -996,6 +1013,7 @@ int set_filter(struct filter_out * const slave,double low,double high,double con
   memcpy(response,impulse,M * sizeof *response);
   memset(response+M,0,(N-M) * sizeof *response);
   fftwf_execute(fwd_filter_plan);
+  destroy_plan(fwd_filter_plan); // was leaked on every call
 #if FILTER_DEBUG
   {
     for(int i=0; i < N; i++)
