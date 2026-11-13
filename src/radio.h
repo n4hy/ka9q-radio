@@ -363,6 +363,7 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *preset);
 int start_demod(struct channel * restrict chan);
 double set_freq(struct channel * restrict ,double);
 double set_first_LO(struct channel const * restrict, double);
+double set_first_LO_locked(struct channel const *chan,double first_LO); // takes the front end tuning lock
 void encode_byte_data(struct channel const *chan,uint8_t *buffer);
 
 // Routines common to the internals of all channel demods

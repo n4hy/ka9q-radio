@@ -443,16 +443,24 @@ int loadconfig(char const *file){
     if(!Global_use_dns || resolve_mcast(Data,&Template.output.dest_socket,DEFAULT_RTP_PORT,NULL,0,2) != 0)
       addr = make_maddr(Data);
 
-    struct sockaddr_in *sin = (struct sockaddr_in *)&Template.output.dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_RTP_PORT);
+    if(addr != 0){
+      // Not resolved through DNS: use the hashed multicast address
+      struct sockaddr_in *sin = (struct sockaddr_in *)&Template.output.dest_socket;
+      sin->sin_family = AF_INET;
+      sin->sin_addr.s_addr = htonl(addr);
+      sin->sin_port = htons(DEFAULT_RTP_PORT);
 
-    // Status sent to same group, different port
-    sin = (struct sockaddr_in *)&Template.status.dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_STAT_PORT);
+      // Status sent to same group, different port
+      sin = (struct sockaddr_in *)&Template.status.dest_socket;
+      sin->sin_family = AF_INET;
+      sin->sin_addr.s_addr = htonl(addr);
+      sin->sin_port = htons(DEFAULT_STAT_PORT);
+    } else {
+      // resolve_mcast() filled in output.dest_socket; don't overwrite it with 0.0.0.0
+      // Status sent to same group, different port
+      memcpy(&Template.status.dest_socket,&Template.output.dest_socket,sizeof Template.status.dest_socket);
+      setportnumber(&Template.status.dest_socket,DEFAULT_STAT_PORT);
+    }
 
     Advertise = config_getboolean(Configtable,GLOBAL,"advertise",true);
 
@@ -501,10 +509,14 @@ int loadconfig(char const *file){
 					DEFAULT_STAT_PORT,NULL,0,2) != 0)
       addr = make_maddr(Metadata_dest_string);
 
-    struct sockaddr_in *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = htonl(addr);
-    sin->sin_port = htons(DEFAULT_STAT_PORT);
+    if(addr != 0){
+      // Not resolved through DNS: use the hashed multicast address
+      // (otherwise resolve_mcast() already filled it in; don't overwrite it with 0.0.0.0)
+      struct sockaddr_in *sin = (struct sockaddr_in *)&Frontend.metadata_dest_socket;
+      sin->sin_family = AF_INET;
+      sin->sin_addr.s_addr = htonl(addr);
+      sin->sin_port = htons(DEFAULT_STAT_PORT);
+    }
 
     if(Advertise) {
       // If dns name already exists in the DNS, advertise the service record but not an address record
@@ -732,7 +744,8 @@ static void *process_section(void *p){
     // If we're not using the DNS, or if resolution fails, hash name string to make IP multicast address in 239.x.x.x range
     addr = make_maddr(data);
 
-  {
+  if(addr != 0){
+    // Not resolved through DNS: use the hashed multicast address
     struct sockaddr_in *sock = (struct sockaddr_in *)&chan_template.output.dest_socket;
     sock->sin_family = AF_INET;
     sock->sin_addr.s_addr = htonl(addr);
@@ -743,6 +756,11 @@ static void *process_section(void *p){
     sock->sin_family = AF_INET;
     sock->sin_addr.s_addr = htonl(addr);
     sock->sin_port = htons(DEFAULT_STAT_PORT);
+  } else {
+    // resolve_mcast() filled in output.dest_socket; don't overwrite it with 0.0.0.0
+    // Status sent to same group, different port
+    memcpy(&chan_template.status.dest_socket,&chan_template.output.dest_socket,sizeof chan_template.status.dest_socket);
+    setportnumber(&chan_template.status.dest_socket,DEFAULT_STAT_PORT);
   }
   if(enable_section_adv) {
     // there may be several hosts with the same section names
@@ -770,7 +788,7 @@ static void *process_section(void *p){
     if(pt == -1){
       fprintf(stderr,"channel template: can't allocate payload type for samprate %'d, channels %d, encoding %d\n",
 	      chan_template.output.samprate,chan_template.output.channels,chan_template.output.encoding); // make sure it's initialized
-	  return -1;
+	  return NULL; // thread function returns void *
     }
     chan_template.output.rtp.type = pt;
   }
@@ -934,8 +952,12 @@ static void *process_section(void *p){
     // Initialize from template, set frequency and start
     // Be careful with shallow copies like this; although the pointers in the channel structure are still NULL
     // the ssrc and inuse fields are active and must be cleaned up. Are there any others...?
+    // The status thread is already running and searches Channel_list under Channel_list_mutex;
+    // don't let it see this slot half-copied (ssrc briefly 0) or race a duplicate create of this ssrc
+    pthread_mutex_lock(&Channel_list_mutex);
     *chan = chan_template;
     chan->output.rtp.ssrc = ssrc; // restore after template copy
+    pthread_mutex_unlock(&Channel_list_mutex);
     snprintf(chan->name, sizeof chan->name, "%s %u", demod_name_from_type(chan->demod_type), chan->output.rtp.ssrc);
     chan->fm.tone_freq = freq_table[i].tone;
     set_freq(chan,freq_table[i].f);
@@ -1163,6 +1185,15 @@ double set_freq(struct channel * const chan,double const f){
   return f;
 }
 
+// set_first_LO() under Freq_mutex, for callers that don't already hold it (e.g., a FIRST_LO_FREQUENCY command)
+// so a direct LO command can't race set_freq() retuning the same front end from another channel thread
+double set_first_LO_locked(struct channel const * const chan,double const first_LO){
+  pthread_mutex_lock(&Freq_mutex);
+  double const r = set_first_LO(chan,first_LO);
+  pthread_mutex_unlock(&Freq_mutex);
+  return r;
+}
+
 // Set first (front end tuner) oscillator
 // Note: single precision floating point is not accurate enough at VHF and above
 // chan->first_LO is NOT updated here!
@@ -1211,7 +1242,16 @@ int compute_tuning(int N, int M, double samprate,int *shift,double *remainder, d
   int const r = V * lrint((freq/hzperbin) / V);
 #else
   (void)M;
-  int const r = lrint(freq/hzperbin);
+  // Range-check in floating point before converting: freq comes (indirectly) from the network,
+  // and lrint() of an out-of-range value truncated to int could wrap into the valid range
+  double const rd = nearbyint(freq/hzperbin);
+  // Check if there's no overlap in the range we want
+  // Intentionally allow real input to go both ways, for front ends with high and low side injection
+  // Even though only one works, this lets us manually check for images
+  // No point in tuning to aliases, though
+  if(!(fabs(rd) < N/2)) // also catches NaN
+    return -1; // Chan thread will wait for the front end status to change
+  int const r = (int)rd;
 #endif
 
   if(shift)
@@ -1220,12 +1260,6 @@ int compute_tuning(int N, int M, double samprate,int *shift,double *remainder, d
   if(remainder)
     *remainder = freq - (r * hzperbin);
 
-  // Check if there's no overlap in the range we want
-  // Intentionally allow real input to go both ways, for front ends with high and low side injection
-  // Even though only one works, this lets us manually check for images
-  // No point in tuning to aliases, though
-  if(abs(r) >= N/2)
-    return -1; // Chan thread will wait for the front end status to change
   return 0;
 }
 
