@@ -228,8 +228,11 @@ int demod_fm(void *arg){
 
 	if(chan->fm.threshold){
 	  // Clamp to peak deviation
-	  if(fabs(phase) > chan->fm.devmax/samprate)
-	    phase = copysign(chan->fm.devmax/samprate, phase);
+	  // phase is in half-cycles/sample (+/-1 = +/-samprate/2 Hz), so devmax Hz is 2*devmax/samprate
+	  // (was devmax/samprate, which clipped at half the peak deviation)
+	  double const maxphase = 2 * chan->fm.devmax / samprate;
+	  if(fabs(phase) > maxphase)
+	    phase = copysign(maxphase, phase);
 
 	  // Weight by IF amplitude
 	  double p1 = cnrm(buffer[n]);
