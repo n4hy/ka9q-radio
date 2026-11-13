@@ -46,6 +46,7 @@ struct sdrstate
   pthread_mutex_t queue_mutex;
   pthread_cond_t  queue_cond;
   _Atomic enum state state;
+  double scale;   // Raw 12-bit samples -> nominal +/-1 with analog gain correction, as other drivers do
 };
 
 static char const *Bladerf_keys[] = {
@@ -217,6 +218,7 @@ static void bladerf_process(struct frontend * const frontend,
 {
 	float complex * const wptr = frontend->in.input_write_pointer.c;
 	double energy = 0;
+	double const sdr_scale = ((struct sdrstate const *)frontend->context)->scale;
 
 	const int16_t *sample = (const int16_t *)samples;
 	for (size_t i=0; i < num_samples; i++) {
@@ -233,8 +235,8 @@ static void bladerf_process(struct frontend * const frontend,
 		if (s & 0x800)
 			s |= 0xf000;
 		__imag__ samp = s;
-		energy += cnrm(samp);
-		wptr[i] = (float complex)samp;
+		energy += cnrm(samp); // raw units; if_power is converted with scale_ADpower2FS()
+		wptr[i] = (float complex)(sdr_scale * samp);
 		sample += 2;
 	}
 	if(num_samples != 0 && !isnan(energy) && isfinite(energy))
@@ -284,6 +286,7 @@ int bladerf_startup(struct frontend * const frontend)
     usleep(10000); // 10 ms
   }
   frontend->in.perform_inline = true;
+  sdr->scale = scale_AD(frontend);
   sdr->num_buffers = 128;
   sdr->num_transfers = 2;
   sdr->idx_to_fill = 0;
