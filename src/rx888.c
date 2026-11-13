@@ -535,8 +535,8 @@ static void *proc_rx888(void *arg){
   }
   rx888_stop_rx(sdr);
   // Can't do anything without the front end; quit entirely
-  if(s != RUNNING && s != STARTING){
-    // We weren't told to stop, the hardware malfunctioned. Exit and let systemd retry us
+  if(s == RUNNING || s == STARTING){
+    // We weren't told to stop (the loop broke out on a watchdog or libusb error), the hardware malfunctioned. Exit and let systemd retry us
     fprintf(stderr,"rx888 has aborted, exiting radiod\n");
     rx888_close(sdr);
     exit(EX_NOINPUT);
@@ -924,27 +924,28 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
     if(sdr->databuffers[i] == NULL)
       goto end;
     sdr->transfers[i] = libusb_alloc_transfer(0);
+    if(sdr->transfers[i] == NULL)
+      goto end;
   }
   sdr->queuedepth = queuedepth;
   sdr->reqsize = reqsize;
   return 0;
 
 end:;
-  free_transfer_buffers(sdr->databuffers,sdr->transfers,sdr->queuedepth);
-
-  FREE(sdr->transfers);
-  FREE(sdr->databuffers);
-
-  if(sdr->dev_handle != NULL)
-    libusb_release_interface(sdr->dev_handle,0);
-  sdr->dev_handle = NULL;
+  // sdr->queuedepth is still 0 here, so use the local queuedepth (the arrays are calloc'ed, unallocated entries are NULL)
+  // free_transfer_buffers() frees the arrays themselves too; just forget the pointers (FREE()ing them again was a double free)
+  free_transfer_buffers(sdr->databuffers,sdr->transfers,queuedepth);
+  sdr->transfers = NULL;
+  sdr->databuffers = NULL;
 
   if(sdr->config)
     libusb_free_config_descriptor(sdr->config);
   sdr->config = NULL;
 
-  if(sdr->dev_handle)
-    libusb_close(sdr->dev_handle);
+  if(sdr->dev_handle != NULL){
+    libusb_release_interface(sdr->dev_handle,0);
+    libusb_close(sdr->dev_handle); // was skipped: the handle had already been set to NULL
+  }
   sdr->dev_handle = NULL;
 
   libusb_exit(NULL);
